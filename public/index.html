@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chasseur vs Runners</title>
+<link rel="stylesheet" href="style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+  <div id="hud">
+    <div id="timer">--:--</div>
+    <div id="role"></div>
+    <div id="status"></div>
+  </div>
+
+  <div id="killfeed"></div>
+
+  <div id="lobby">
+    <h1>Chasseur vs Runners</h1>
+    <p class="sub">Les runners doivent survivre au chrono. Le chasseur doit tous les éliminer.</p>
+    <input id="nameInput" maxlength="16" placeholder="Ton pseudo" />
+    <div id="lobbyStatus">Connexion...</div>
+    <ul id="playerList"></ul>
+    <p class="hint">Clique sur l'écran pour jouer : WASD pour bouger, souris pour regarder, clic gauche pour attaquer (chasseur uniquement).</p>
+  </div>
+
+  <div id="endScreen" class="hidden">
+    <h2 id="endTitle"></h2>
+    <p id="endReason"></p>
+  </div>
+
+  <div id="crosshair"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="client.js"></script>
+</body>
+</html>

@@ -1,0 +1,372 @@
+import * as THREE from 'three';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+const ARENA_RADIUS = 28;
+const MOVE_SPEED = 8;
+const NETWORK_RATE_MS = 50;
+
+// ---------- DOM ----------
+const timerEl = document.getElementById('timer');
+const roleEl = document.getElementById('role');
+const statusEl = document.getElementById('status');
+const killfeedEl = document.getElementById('killfeed');
+const lobbyEl = document.getElementById('lobby');
+const lobbyStatusEl = document.getElementById('lobbyStatus');
+const playerListEl = document.getElementById('playerList');
+const nameInput = document.getElementById('nameInput');
+const endScreenEl = document.getElementById('endScreen');
+const endTitleEl = document.getElementById('endTitle');
+const endReasonEl = document.getElementById('endReason');
+const crosshairEl = document.getElementById('crosshair');
+
+nameInput.value = localStorage.getItem('cvrName') || '';
+
+// ---------- Networking ----------
+const socket = io();
+let myId = null;
+let myRole = 'spectator';
+let alive = true;
+let gameState = 'lobby';
+
+// ---------- Three.js setup ----------
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e14);
+scene.fog = new THREE.Fog(0x0a0e14, 20, 60);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 200);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const hemi = new THREE.HemisphereLight(0x8899aa, 0x223344, 1.0);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(20, 30, 10);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -35;
+sun.shadow.camera.right = 35;
+sun.shadow.camera.top = 35;
+sun.shadow.camera.bottom = -35;
+scene.add(sun);
+
+// Ground
+const groundGeo = new THREE.CircleGeometry(ARENA_RADIUS, 48);
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x1c2a38 });
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Boundary wall (visual)
+const wallGeo = new THREE.CylinderGeometry(ARENA_RADIUS, ARENA_RADIUS, 4, 48, 1, true);
+const wallMat = new THREE.MeshStandardMaterial({ color: 0x2c3e50, side: THREE.BackSide, transparent: true, opacity: 0.6 });
+const wall = new THREE.Mesh(wallGeo, wallMat);
+wall.position.y = 2;
+scene.add(wall);
+
+// Fixed obstacle layout (same for every client, deterministic)
+const OBSTACLES = [
+  [8, 0, 3], [-9, 0, 5], [5, 0, -10], [-6, 0, -8], [14, 0, -4],
+  [-14, 0, -2], [0, 0, 12], [2, 0, -16], [-3, 0, 15], [10, 0, 10],
+  [-11, 0, 11], [-16, 0, -12], [16, 0, 6], [-4, 0, -18], [6, 0, 17]
+];
+const boxMat = new THREE.MeshStandardMaterial({ color: 0x3a4f63 });
+for (const [x, , z] of OBSTACLES) {
+  const size = 2 + Math.random() * 1.5; // visual only, not synced across clients but fine for cover
+  const box = new THREE.Mesh(new THREE.BoxGeometry(size, size * 1.6, size), boxMat);
+  box.position.set(x, (size * 1.6) / 2, z);
+  box.castShadow = true;
+  box.receiveShadow = true;
+  scene.add(box);
+}
+
+// ---------- Controls ----------
+const controls = new PointerLockControls(camera, renderer.domElement);
+scene.add(controls.getObject());
+
+const keys = { forward: false, back: false, left: false, right: false };
+document.addEventListener('keydown', (e) => {
+  switch (e.code) {
+    case 'KeyW': case 'ArrowUp': keys.forward = true; break;
+    case 'KeyS': case 'ArrowDown': keys.back = true; break;
+    case 'KeyA': case 'ArrowLeft': keys.left = true; break;
+    case 'KeyD': case 'ArrowRight': keys.right = true; break;
+  }
+});
+document.addEventListener('keyup', (e) => {
+  switch (e.code) {
+    case 'KeyW': case 'ArrowUp': keys.forward = false; break;
+    case 'KeyS': case 'ArrowDown': keys.back = false; break;
+    case 'KeyA': case 'ArrowLeft': keys.left = false; break;
+    case 'KeyD': case 'ArrowRight': keys.right = false; break;
+  }
+});
+
+renderer.domElement.addEventListener('click', () => {
+  if (gameState === 'running' && alive) {
+    controls.lock();
+  }
+});
+
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  if (gameState !== 'running' || !alive || myRole !== 'hunter') return;
+  if (!controls.isLocked) return;
+  socket.emit('attack');
+});
+
+controls.addEventListener('lock', () => { crosshairEl.style.display = 'block'; });
+controls.addEventListener('unlock', () => { crosshairEl.style.display = 'none'; });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- Remote players ----------
+const remotePlayers = new Map(); // id -> { mesh, role }
+const knownPlayers = new Map(); // id -> { name, color, role, alive } (latest authoritative info from server)
+
+function buildAvatar(color, role) {
+  const group = new THREE.Group();
+  const bodyMat = new THREE.MeshStandardMaterial({ color });
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.45, 1.0, 4, 8), bodyMat);
+  body.position.y = 1;
+  body.castShadow = true;
+  group.add(body);
+
+  if (role === 'hunter') {
+    const spikeMat = new THREE.MeshStandardMaterial({ color: 0xff3030, emissive: 0x550000 });
+    const spike = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.5, 8), spikeMat);
+    spike.position.y = 1.95;
+    group.add(spike);
+  }
+  return group;
+}
+
+function addOrUpdateRemote(p) {
+  if (p.id === myId) return;
+  const known = knownPlayers.get(p.id);
+  const color = known ? known.color : 0xffffff;
+  const role = known ? known.role : 'runner';
+  const alive = known ? known.alive : true;
+
+  let entry = remotePlayers.get(p.id);
+  if (!entry || entry.role !== role) {
+    if (entry) scene.remove(entry.mesh);
+    const mesh = buildAvatar(color, role);
+    scene.add(mesh);
+    entry = { mesh, role };
+    remotePlayers.set(p.id, entry);
+  }
+  entry.mesh.position.set(p.x, 0, p.z);
+  entry.mesh.rotation.y = p.ry;
+  entry.mesh.visible = alive;
+}
+
+function updateRemoteVisibility(id, alive) {
+  const entry = remotePlayers.get(id);
+  if (entry) entry.mesh.visible = alive;
+}
+
+function removeRemote(id) {
+  const entry = remotePlayers.get(id);
+  if (entry) {
+    scene.remove(entry.mesh);
+    remotePlayers.delete(id);
+  }
+}
+
+function clearAllRemotes() {
+  for (const id of Array.from(remotePlayers.keys())) removeRemote(id);
+}
+
+// ---------- Game state / UI ----------
+let allPlayers = new Map(); // id -> data, used for lobby list
+
+function renderLobbyUI(payload) {
+  const { state, countdown, players: list } = payload;
+  gameState = state;
+  allPlayers = new Map(list.map((p) => [p.id, p]));
+  for (const p of list) knownPlayers.set(p.id, p);
+
+  if (state === 'running' || state === 'ended') {
+    lobbyEl.classList.add('hidden');
+  } else {
+    lobbyEl.classList.remove('hidden');
+    if (state === 'countdown') {
+      lobbyStatusEl.textContent = `La partie démarre dans ${countdown}s...`;
+    } else {
+      const need = Math.max(0, 2 - list.length);
+      lobbyStatusEl.textContent = need > 0
+        ? `En attente de joueurs... (${list.length} connecté(s), encore ${need} requis)`
+        : `En attente...`;
+    }
+    playerListEl.innerHTML = '';
+    for (const p of list) {
+      const li = document.createElement('li');
+      li.textContent = p.name;
+      li.style.color = `#${p.color.toString(16).padStart(6, '0')}`;
+      playerListEl.appendChild(li);
+    }
+  }
+}
+
+function formatTime(sec) {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, '0')}`;
+}
+
+function addKillfeed(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  killfeedEl.appendChild(div);
+  setTimeout(() => div.remove(), 5000);
+}
+
+// ---------- Socket events ----------
+socket.on('connect', () => {
+  myId = socket.id;
+  const savedName = localStorage.getItem('cvrName');
+  if (savedName) socket.emit('setName', savedName);
+});
+
+socket.on('init', (payload) => {
+  myId = payload.id;
+  gameState = payload.state;
+  renderLobbyUI({ state: payload.state, countdown: payload.countdown, players: payload.players });
+  roundRemaining = payload.roundRemaining || 0;
+  timerEl.textContent = formatTime(roundRemaining);
+  clearAllRemotes();
+  for (const p of payload.players) addOrUpdateRemote(p);
+});
+
+socket.on('lobby', (payload) => {
+  renderLobbyUI(payload);
+});
+
+let roundRemaining = 0;
+
+socket.on('roundStart', (payload) => {
+  gameState = 'running';
+  roundRemaining = payload.duration;
+  endScreenEl.classList.add('hidden');
+  clearAllRemotes();
+  for (const p of payload.players) knownPlayers.set(p.id, p);
+  for (const p of payload.players) {
+    if (p.id === myId) {
+      myRole = p.role;
+      alive = true;
+      controls.getObject().position.set(p.x, 1.6, p.z);
+      controls.getObject().rotation.y = p.ry;
+      roleEl.textContent = myRole === 'hunter' ? '🔴 Tu es le CHASSEUR' : '🏃 Tu es un RUNNER';
+      statusEl.textContent = myRole === 'hunter' ? 'Clique pour attaquer les runners proches' : 'Survis jusqu\'à la fin du chrono !';
+    } else {
+      addOrUpdateRemote(p);
+    }
+  }
+  statusEl.textContent += ' — Clique sur l\'écran pour jouer';
+});
+
+socket.on('timer', (payload) => {
+  roundRemaining = payload.remaining;
+  timerEl.textContent = formatTime(roundRemaining);
+});
+
+socket.on('playerJoined', (p) => {
+  knownPlayers.set(p.id, p);
+  allPlayers.set(p.id, p);
+  if (gameState === 'running') addOrUpdateRemote(p);
+});
+
+socket.on('playerLeft', ({ id }) => {
+  removeRemote(id);
+});
+
+socket.on('playerMoved', (p) => {
+  if (!knownPlayers.has(p.id)) return;
+  addOrUpdateRemote(p);
+});
+
+socket.on('killed', ({ id }) => {
+  const known = knownPlayers.get(id);
+  if (known) known.alive = false;
+  const name = allPlayers.get(id)?.name || 'Un runner';
+  updateRemoteVisibility(id, false);
+  if (id === myId) {
+    alive = false;
+    statusEl.textContent = 'Tu as été éliminé. Tu observes la fin de la partie...';
+    controls.unlock();
+  } else {
+    addKillfeed(`💀 ${name} a été éliminé`);
+  }
+});
+
+socket.on('roundEnd', ({ winner, reason }) => {
+  gameState = 'ended';
+  controls.unlock();
+  endTitleEl.textContent = winner === 'hunter' ? 'Le chasseur gagne !' : 'Les runners gagnent !';
+  endTitleEl.style.color = winner === 'hunter' ? '#ff5050' : '#50ff8a';
+  endReasonEl.textContent = reason;
+  endScreenEl.classList.remove('hidden');
+});
+
+nameInput.addEventListener('change', () => {
+  const val = nameInput.value.trim();
+  if (val) {
+    localStorage.setItem('cvrName', val);
+    socket.emit('setName', val);
+  }
+});
+
+// ---------- Movement loop ----------
+let lastSent = 0;
+const clock = new THREE.Clock();
+
+function updateMovement(delta) {
+  if (gameState !== 'running' || !alive || !controls.isLocked) return;
+
+  const speed = MOVE_SPEED * delta;
+  const forwardInput = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0);
+  const rightInput = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+
+  if (forwardInput !== 0) controls.moveForward(forwardInput * speed);
+  if (rightInput !== 0) controls.moveRight(rightInput * speed);
+
+  const obj = controls.getObject();
+  obj.position.y = 1.6;
+
+  const distFromCenter = Math.sqrt(obj.position.x ** 2 + obj.position.z ** 2);
+  if (distFromCenter > ARENA_RADIUS - 1) {
+    const scale = (ARENA_RADIUS - 1) / distFromCenter;
+    obj.position.x *= scale;
+    obj.position.z *= scale;
+  }
+
+  const now = performance.now();
+  if (now - lastSent > NETWORK_RATE_MS) {
+    lastSent = now;
+    socket.emit('move', {
+      x: obj.position.x,
+      y: obj.position.y,
+      z: obj.position.z,
+      ry: obj.rotation.y
+    });
+  }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = Math.min(clock.getDelta(), 0.1);
+  updateMovement(delta);
+  renderer.render(scene, camera);
+}
+animate();

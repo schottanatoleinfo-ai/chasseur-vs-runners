@@ -1,0 +1,86 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; overflow: hidden; height: 100%; background: #0a0e14; font-family: 'Segoe UI', Arial, sans-serif; }
+canvas { display: block; }
+
+#hud {
+  position: fixed;
+  top: 12px; left: 50%;
+  transform: translateX(-50%);
+  color: #fff;
+  text-align: center;
+  z-index: 10;
+  pointer-events: none;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.8);
+}
+#timer { font-size: 32px; font-weight: 700; letter-spacing: 1px; }
+#role { font-size: 16px; margin-top: 2px; font-weight: 600; }
+#status { font-size: 14px; margin-top: 4px; opacity: 0.85; }
+
+#crosshair {
+  position: fixed;
+  top: 50%; left: 50%;
+  width: 6px; height: 6px;
+  margin: -3px 0 0 -3px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.85);
+  z-index: 10;
+  display: none;
+}
+
+#killfeed {
+  position: fixed;
+  top: 12px; right: 12px;
+  z-index: 10;
+  color: #fff;
+  font-size: 13px;
+  text-align: right;
+  pointer-events: none;
+}
+#killfeed div { margin-bottom: 4px; background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px; }
+
+#lobby {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: radial-gradient(circle at center, #16202e 0%, #060a10 100%);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  text-align: center;
+}
+#lobby h1 { font-size: 40px; margin-bottom: 4px; letter-spacing: 1px; }
+#lobby .sub { color: #9db0c4; margin-bottom: 20px; max-width: 480px; }
+#nameInput {
+  padding: 10px 14px;
+  font-size: 16px;
+  border-radius: 6px;
+  border: 1px solid #2c3e50;
+  background: #101822;
+  color: #fff;
+  margin-bottom: 12px;
+  width: 260px;
+  outline: none;
+}
+#lobbyStatus { font-size: 18px; font-weight: 600; margin-bottom: 12px; color: #f5a93f; }
+#playerList { list-style: none; padding: 0; margin: 0 0 16px 0; max-width: 340px; }
+#playerList li { padding: 4px 0; font-size: 15px; }
+.hint { color: #6b7f93; font-size: 13px; max-width: 420px; }
+
+#endScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  background: rgba(5, 8, 12, 0.88);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+#endScreen h2 { font-size: 48px; margin-bottom: 8px; }
+#endScreen p { font-size: 18px; color: #b7c4d1; }
+.hidden { display: none !important; }
