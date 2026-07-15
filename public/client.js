@@ -69,20 +69,36 @@ const wall = new THREE.Mesh(wallGeo, wallMat);
 wall.position.y = 2;
 scene.add(wall);
 
-// Fixed obstacle layout (same for every client, deterministic)
+// Fixed obstacle layout (deterministic: identical position/size for every client and for collision)
 const OBSTACLES = [
-  [8, 0, 3], [-9, 0, 5], [5, 0, -10], [-6, 0, -8], [14, 0, -4],
-  [-14, 0, -2], [0, 0, 12], [2, 0, -16], [-3, 0, 15], [10, 0, 10],
-  [-11, 0, 11], [-16, 0, -12], [16, 0, 6], [-4, 0, -18], [6, 0, 17]
+  { x: 8, z: 3, size: 3.4 }, { x: -9, z: 5, size: 2.6 }, { x: 5, z: -10, size: 3.0 },
+  { x: -6, z: -8, size: 2.4 }, { x: 14, z: -4, size: 3.2 }, { x: -14, z: -2, size: 2.8 },
+  { x: 0, z: 12, size: 3.6 }, { x: 2, z: -16, size: 2.6 }, { x: -3, z: 15, size: 3.0 },
+  { x: 10, z: 10, size: 2.4 }, { x: -11, z: 11, size: 3.4 }, { x: -16, z: -12, size: 2.8 },
+  { x: 16, z: 6, size: 3.0 }, { x: -4, z: -18, size: 2.6 }, { x: 6, z: 17, size: 3.2 }
 ];
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
 const boxMat = new THREE.MeshStandardMaterial({ color: 0x3a4f63 });
-for (const [x, , z] of OBSTACLES) {
-  const size = 2 + Math.random() * 1.5; // visual only, not synced across clients but fine for cover
-  const box = new THREE.Mesh(new THREE.BoxGeometry(size, size * 1.6, size), boxMat);
-  box.position.set(x, (size * 1.6) / 2, z);
+for (const o of OBSTACLES) {
+  const height = o.size * 1.6;
+  const box = new THREE.Mesh(boxGeo, boxMat);
+  box.scale.set(o.size, height, o.size);
+  box.position.set(o.x, height / 2, o.z);
   box.castShadow = true;
   box.receiveShadow = true;
   scene.add(box);
+}
+
+// ---------- Collision ----------
+const PLAYER_RADIUS = 0.5;
+
+function collidesAt(x, z) {
+  for (const o of OBSTACLES) {
+    const half = o.size / 2 + PLAYER_RADIUS;
+    if (Math.abs(x - o.x) < half && Math.abs(z - o.z) < half) return true;
+  }
+  const distFromCenter = Math.sqrt(x * x + z * z);
+  return distFromCenter > ARENA_RADIUS - 1;
 }
 
 // ---------- Controls ----------
@@ -150,7 +166,7 @@ function buildAvatar(color, role) {
   return group;
 }
 
-function addOrUpdateRemote(p) {
+function addOrUpdateRemote(p, snap = false) {
   if (p.id === myId) return;
   const known = knownPlayers.get(p.id);
   const color = known ? known.color : 0xffffff;
@@ -158,16 +174,34 @@ function addOrUpdateRemote(p) {
   const alive = known ? known.alive : true;
 
   let entry = remotePlayers.get(p.id);
+  let isNew = false;
   if (!entry || entry.role !== role) {
     if (entry) scene.remove(entry.mesh);
     const mesh = buildAvatar(color, role);
     scene.add(mesh);
-    entry = { mesh, role };
+    entry = { mesh, role, target: { x: p.x, z: p.z, ry: p.ry } };
     remotePlayers.set(p.id, entry);
+    isNew = true;
   }
-  entry.mesh.position.set(p.x, 0, p.z);
-  entry.mesh.rotation.y = p.ry;
+  entry.target.x = p.x;
+  entry.target.z = p.z;
+  entry.target.ry = p.ry;
   entry.mesh.visible = alive;
+  if (snap || isNew) {
+    entry.mesh.position.set(p.x, 0, p.z);
+    entry.mesh.rotation.y = p.ry;
+  }
+}
+
+function interpolateRemotes(delta) {
+  const t = 1 - Math.pow(0.001, delta); // framerate-independent smoothing
+  for (const entry of remotePlayers.values()) {
+    entry.mesh.position.x += (entry.target.x - entry.mesh.position.x) * t;
+    entry.mesh.position.z += (entry.target.z - entry.mesh.position.z) * t;
+    let dRy = entry.target.ry - entry.mesh.rotation.y;
+    dRy = ((dRy + Math.PI) % (Math.PI * 2)) - Math.PI; // shortest angular path
+    entry.mesh.rotation.y += dRy * t;
+  }
 }
 
 function updateRemoteVisibility(id, alive) {
@@ -330,26 +364,34 @@ nameInput.addEventListener('change', () => {
 // ---------- Movement loop ----------
 let lastSent = 0;
 const clock = new THREE.Clock();
+const HUNTER_SPEED_MULTIPLIER = 1.15;
+
+const _right = new THREE.Vector3();
+const _forward = new THREE.Vector3();
 
 function updateMovement(delta) {
   if (gameState !== 'running' || !alive || !controls.isLocked) return;
 
-  const speed = MOVE_SPEED * delta;
+  const speedMultiplier = myRole === 'hunter' ? HUNTER_SPEED_MULTIPLIER : 1.0;
+  const speed = MOVE_SPEED * speedMultiplier * delta;
   const forwardInput = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0);
   const rightInput = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
 
-  if (forwardInput !== 0) controls.moveForward(forwardInput * speed);
-  if (rightInput !== 0) controls.moveRight(rightInput * speed);
-
   const obj = controls.getObject();
-  obj.position.y = 1.6;
 
-  const distFromCenter = Math.sqrt(obj.position.x ** 2 + obj.position.z ** 2);
-  if (distFromCenter > ARENA_RADIUS - 1) {
-    const scale = (ARENA_RADIUS - 1) / distFromCenter;
-    obj.position.x *= scale;
-    obj.position.z *= scale;
+  if (forwardInput !== 0 || rightInput !== 0) {
+    _right.setFromMatrixColumn(camera.matrix, 0);
+    _forward.crossVectors(camera.up, _right);
+
+    const dx = (_forward.x * forwardInput + _right.x * rightInput) * speed;
+    const dz = (_forward.z * forwardInput + _right.z * rightInput) * speed;
+
+    // Resolve X and Z separately so the player slides along obstacle edges instead of stopping dead.
+    if (!collidesAt(obj.position.x + dx, obj.position.z)) obj.position.x += dx;
+    if (!collidesAt(obj.position.x, obj.position.z + dz)) obj.position.z += dz;
   }
+
+  obj.position.y = 1.6;
 
   const now = performance.now();
   if (now - lastSent > NETWORK_RATE_MS) {
@@ -367,6 +409,7 @@ function animate() {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.1);
   updateMovement(delta);
+  interpolateRemotes(delta);
   renderer.render(scene, camera);
 }
 animate();
