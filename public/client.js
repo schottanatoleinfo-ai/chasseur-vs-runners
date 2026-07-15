@@ -4,6 +4,8 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 const ARENA_RADIUS = 28;
 const MOVE_SPEED = 8;
 const NETWORK_RATE_MS = 50;
+const KILL_RADIUS = 2.2; // must match server's KILL_RADIUS, duplicated here for offline (bot) mode
+const HUNTER_SPEED_MULTIPLIER = 1.15;
 
 // ---------- DOM ----------
 const timerEl = document.getElementById('timer');
@@ -18,6 +20,9 @@ const endScreenEl = document.getElementById('endScreen');
 const endTitleEl = document.getElementById('endTitle');
 const endReasonEl = document.getElementById('endReason');
 const crosshairEl = document.getElementById('crosshair');
+const offlineBtn = document.getElementById('offlineBtn');
+const offlineControlsEl = document.getElementById('offlineControls');
+const offlineExitBtn = document.getElementById('offlineExitBtn');
 
 nameInput.value = localStorage.getItem('cvrName') || '';
 
@@ -27,6 +32,7 @@ let myId = null;
 let myRole = 'spectator';
 let alive = true;
 let gameState = 'lobby';
+let offlineMode = false;
 
 // ---------- Three.js setup ----------
 const scene = new THREE.Scene();
@@ -133,7 +139,11 @@ document.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
   if (gameState !== 'running' || !alive || myRole !== 'hunter') return;
   if (!controls.isLocked) return;
-  socket.emit('attack');
+  if (offlineMode) {
+    attackOfflineBots();
+  } else {
+    socket.emit('attack');
+  }
 });
 
 controls.addEventListener('lock', () => { crosshairEl.style.display = 'block'; });
@@ -165,6 +175,145 @@ function buildAvatar(color, role) {
   }
   return group;
 }
+
+// ---------- Offline mode (solo, vs bots — for testing changes without a second player) ----------
+const OFFLINE_RUNNER_BOT_COUNT = 3;
+const BOT_RUNNER_SPEED = MOVE_SPEED * 0.7;
+const BOT_HUNTER_SPEED = MOVE_SPEED * HUNTER_SPEED_MULTIPLIER;
+let offlineBots = [];
+
+function randomArenaPoint() {
+  let x = 0, z = 0;
+  for (let tries = 0; tries < 20; tries++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * (ARENA_RADIUS - 3);
+    x = Math.cos(angle) * r;
+    z = Math.sin(angle) * r;
+    if (!collidesAt(x, z)) break;
+  }
+  return { x, z };
+}
+
+function clearOfflineBots() {
+  for (const bot of offlineBots) scene.remove(bot.mesh);
+  offlineBots = [];
+}
+
+function spawnOfflineBots() {
+  clearOfflineBots();
+  if (myRole === 'hunter') {
+    for (let i = 0; i < OFFLINE_RUNNER_BOT_COUNT; i++) {
+      const pos = randomArenaPoint();
+      const mesh = buildAvatar(0x3fa9f5, 'runner');
+      mesh.position.set(pos.x, 0, pos.z);
+      scene.add(mesh);
+      offlineBots.push({ mesh, x: pos.x, z: pos.z, alive: true, role: 'runner', wanderTarget: randomArenaPoint() });
+    }
+  } else {
+    const pos = randomArenaPoint();
+    const mesh = buildAvatar(0xff3030, 'hunter');
+    mesh.position.set(pos.x, 0, pos.z);
+    scene.add(mesh);
+    offlineBots.push({ mesh, x: pos.x, z: pos.z, alive: true, role: 'hunter' });
+  }
+}
+
+function moveBotToward(bot, tx, tz, step) {
+  const dx = tx - bot.x, dz = tz - bot.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 0.05) return;
+  const moveX = (dx / dist) * Math.min(step, dist);
+  const moveZ = (dz / dist) * Math.min(step, dist);
+  if (!collidesAt(bot.x + moveX, bot.z)) bot.x += moveX;
+  if (!collidesAt(bot.x, bot.z + moveZ)) bot.z += moveZ;
+  bot.mesh.rotation.y = Math.atan2(moveX, moveZ);
+}
+
+function updateOfflineBots(delta) {
+  const obj = controls.getObject();
+  for (const bot of offlineBots) {
+    if (!bot.alive) continue;
+    if (bot.role === 'runner') {
+      if (Math.hypot(bot.wanderTarget.x - bot.x, bot.wanderTarget.z - bot.z) < 1) {
+        bot.wanderTarget = randomArenaPoint();
+      }
+      moveBotToward(bot, bot.wanderTarget.x, bot.wanderTarget.z, BOT_RUNNER_SPEED * delta);
+    } else if (alive) {
+      moveBotToward(bot, obj.position.x, obj.position.z, BOT_HUNTER_SPEED * delta);
+      const dist = Math.hypot(obj.position.x - bot.x, obj.position.z - bot.z);
+      if (dist <= KILL_RADIUS) {
+        alive = false;
+        controls.unlock();
+        statusEl.textContent = '[HORS LIGNE] Le bot chasseur t\'a attrapé ! Touche R pour réessayer.';
+      }
+    }
+    bot.mesh.position.set(bot.x, 0, bot.z);
+  }
+}
+
+function attackOfflineBots() {
+  const obj = controls.getObject();
+  for (const bot of offlineBots) {
+    if (!bot.alive) continue;
+    const dist = Math.hypot(obj.position.x - bot.x, obj.position.z - bot.z);
+    if (dist <= KILL_RADIUS) {
+      bot.alive = false;
+      bot.mesh.visible = false;
+      addKillfeed('💀 [HORS LIGNE] Bot éliminé');
+      setTimeout(() => {
+        const pos = randomArenaPoint();
+        bot.x = pos.x; bot.z = pos.z;
+        bot.mesh.position.set(pos.x, 0, pos.z);
+        bot.mesh.visible = true;
+        bot.alive = true;
+      }, 3000);
+    }
+  }
+}
+
+function offlineRoleStatusText() {
+  const base = myRole === 'hunter'
+    ? 'Clique pour attaquer les bots runners (bleus). Touche R pour changer de rôle.'
+    : 'Fuis le bot chasseur (rouge) — il te rattrape s\'il te touche. Touche R pour changer de rôle.';
+  return `${base} — Clique sur l'écran pour activer les contrôles.`;
+}
+
+function toggleOfflineRole() {
+  myRole = myRole === 'hunter' ? 'runner' : 'hunter';
+  alive = true;
+  controls.getObject().position.set(0, 1.6, 0);
+  spawnOfflineBots();
+  roleEl.textContent = myRole === 'hunter' ? '🔴 [HORS LIGNE] Chasseur (test)' : '🏃 [HORS LIGNE] Runner (test)';
+  statusEl.textContent = offlineRoleStatusText();
+}
+
+function startOfflineMode() {
+  offlineMode = true;
+  socket.disconnect();
+  myRole = 'hunter';
+  alive = true;
+  gameState = 'running';
+  lobbyEl.classList.add('hidden');
+  endScreenEl.classList.add('hidden');
+  offlineControlsEl.classList.remove('hidden');
+  clearAllRemotes();
+  controls.getObject().position.set(0, 1.6, 0);
+  controls.getObject().rotation.y = 0;
+  spawnOfflineBots();
+  roleEl.textContent = '🔴 [HORS LIGNE] Chasseur (test)';
+  statusEl.textContent = offlineRoleStatusText();
+  timerEl.textContent = '∞';
+}
+
+function exitOfflineMode() {
+  location.reload();
+}
+
+offlineBtn.addEventListener('click', startOfflineMode);
+offlineExitBtn.addEventListener('click', exitOfflineMode);
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'KeyR' && offlineMode) toggleOfflineRole();
+});
 
 function addOrUpdateRemote(p, snap = false) {
   if (p.id === myId) return;
@@ -365,7 +514,6 @@ nameInput.addEventListener('change', () => {
 // ---------- Movement loop ----------
 let lastSent = 0;
 const clock = new THREE.Clock();
-const HUNTER_SPEED_MULTIPLIER = 1.15;
 
 const _right = new THREE.Vector3();
 const _forward = new THREE.Vector3();
@@ -394,6 +542,8 @@ function updateMovement(delta) {
 
   obj.position.y = 1.6;
 
+  if (offlineMode) return;
+
   const now = performance.now();
   if (now - lastSent > NETWORK_RATE_MS) {
     lastSent = now;
@@ -410,6 +560,7 @@ function animate() {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.1);
   updateMovement(delta);
+  if (offlineMode) updateOfflineBots(delta);
   interpolateRemotes(delta);
   renderer.render(scene, camera);
 }

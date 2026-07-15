@@ -11,7 +11,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 const MIN_PLAYERS = 2;
-const COUNTDOWN_SECONDS = 10;
+const COUNTDOWN_SECONDS = 5;
 const ROUND_SECONDS = 150;
 const KILL_RADIUS = 2.2;
 
