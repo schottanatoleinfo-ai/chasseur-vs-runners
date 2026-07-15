@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 
-const ARENA_RADIUS = 28;
+const ARENA_RADIUS = 45;
 const MOVE_SPEED = 8;
 const NETWORK_RATE_MS = 50;
 const KILL_RADIUS = 2.2; // must match server's KILL_RADIUS, duplicated here for offline (bot) mode
-const HUNTER_SPEED_MULTIPLIER = 1.15;
+const HUNTER_SPEED_MULTIPLIER = 1.08;
 
 // ---------- DOM ----------
 const timerEl = document.getElementById('timer');
@@ -23,6 +23,8 @@ const crosshairEl = document.getElementById('crosshair');
 const offlineBtn = document.getElementById('offlineBtn');
 const offlineControlsEl = document.getElementById('offlineControls');
 const offlineExitBtn = document.getElementById('offlineExitBtn');
+const killBannerEl = document.getElementById('killBanner');
+const killBannerTextEl = document.getElementById('killBannerText');
 
 nameInput.value = localStorage.getItem('cvrName') || '';
 
@@ -37,35 +39,29 @@ let offlineMode = false;
 // ---------- Three.js setup ----------
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0a0e14);
-scene.fog = new THREE.Fog(0x0a0e14, 20, 60);
+scene.fog = new THREE.Fog(0x0a0e14, 25, 95);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 200);
 camera.position.set(0, 1.6, 0);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Shadows and antialiasing are disabled and pixel ratio is capped: this game is simple enough
+// visually that raw GPU-bound rendering cost (not asset count) was the main FPS killer on weaker machines.
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-renderer.shadowMap.enabled = true;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
 document.body.appendChild(renderer.domElement);
 
 const hemi = new THREE.HemisphereLight(0x8899aa, 0x223344, 1.0);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(20, 30, 10);
-sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-sun.shadow.camera.left = -35;
-sun.shadow.camera.right = 35;
-sun.shadow.camera.top = 35;
-sun.shadow.camera.bottom = -35;
 scene.add(sun);
 
 // Ground
-const groundGeo = new THREE.CircleGeometry(ARENA_RADIUS, 48);
+const groundGeo = new THREE.CircleGeometry(ARENA_RADIUS, 32);
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x1c2a38 });
 const ground = new THREE.Mesh(groundGeo, groundMat);
 ground.rotation.x = -Math.PI / 2;
-ground.receiveShadow = true;
 scene.add(ground);
 
 // Boundary wall (visual)
@@ -75,24 +71,56 @@ const wall = new THREE.Mesh(wallGeo, wallMat);
 wall.position.y = 2;
 scene.add(wall);
 
-// Fixed obstacle layout (deterministic: identical position/size for every client and for collision)
+// Fixed obstacle layout: small round pillars (deterministic, identical for every client and for collision).
+// Small radius on purpose so a runner can juke around them in a tight circle while being chased.
+const PILLAR_HEIGHT = 2.4;
 const OBSTACLES = [
-  { x: 8, z: 3, size: 3.4 }, { x: -9, z: 5, size: 2.6 }, { x: 5, z: -10, size: 3.0 },
-  { x: -6, z: -8, size: 2.4 }, { x: 14, z: -4, size: 3.2 }, { x: -14, z: -2, size: 2.8 },
-  { x: 0, z: 12, size: 3.6 }, { x: 2, z: -16, size: 2.6 }, { x: -3, z: 15, size: 3.0 },
-  { x: 10, z: 10, size: 2.4 }, { x: -11, z: 11, size: 3.4 }, { x: -16, z: -12, size: 2.8 },
-  { x: 16, z: 6, size: 3.0 }, { x: -4, z: -18, size: 2.6 }, { x: 6, z: 17, size: 3.2 }
+  { x: 8, z: 3, radius: 1.2 }, { x: -9, z: 5, radius: 1.0 }, { x: 5, z: -10, radius: 1.3 },
+  { x: -6, z: -8, radius: 0.9 }, { x: 14, z: -4, radius: 1.1 }, { x: -14, z: -2, radius: 1.2 },
+  { x: 0, z: 12, radius: 1.4 }, { x: 2, z: -16, radius: 1.0 }, { x: -3, z: 15, radius: 1.1 },
+  { x: 10, z: 10, radius: 0.9 }, { x: -11, z: 11, radius: 1.3 }, { x: -16, z: -12, radius: 1.0 },
+  { x: 16, z: 6, radius: 1.2 }, { x: -4, z: -18, radius: 1.0 }, { x: 6, z: 17, radius: 1.3 },
+  { x: 20, z: 14, radius: 1.1 }, { x: -20, z: 8, radius: 0.9 }, { x: 12, z: -14, radius: 1.2 },
+  { x: -8, z: -16, radius: 1.0 }, { x: 3, z: -3, radius: 0.9 },
+  { x: 28, z: 6, radius: 1.2 }, { x: -28, z: -6, radius: 1.1 }, { x: 6, z: 28, radius: 1.3 },
+  { x: -6, z: -30, radius: 1.0 }, { x: 24, z: -22, radius: 1.2 }, { x: -24, z: 22, radius: 1.1 },
+  { x: 32, z: -10, radius: 0.9 }, { x: -32, z: 12, radius: 1.3 }, { x: 14, z: 32, radius: 1.0 },
+  { x: -16, z: -34, radius: 1.2 }, { x: 36, z: 18, radius: 1.1 }, { x: -36, z: -16, radius: 0.9 }
 ];
-const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-const boxMat = new THREE.MeshStandardMaterial({ color: 0x3a4f63 });
+const pillarGeo = new THREE.CylinderGeometry(1, 1, 1, 10);
+const pillarMat = new THREE.MeshStandardMaterial({ color: 0x3a4f63 });
 for (const o of OBSTACLES) {
-  const height = o.size * 1.6;
-  const box = new THREE.Mesh(boxGeo, boxMat);
-  box.scale.set(o.size, height, o.size);
-  box.position.set(o.x, height / 2, o.z);
-  box.castShadow = true;
-  box.receiveShadow = true;
-  scene.add(box);
+  const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+  pillar.scale.set(o.radius, PILLAR_HEIGHT, o.radius);
+  pillar.position.set(o.x, PILLAR_HEIGHT / 2, o.z);
+  scene.add(pillar);
+}
+
+// Street lamps: fixed decorative light sources scattered around the arena for visibility/atmosphere.
+const LAMP_POSITIONS = [
+  { x: 0, z: -22 }, { x: 18, z: 0 }, { x: -18, z: 0 },
+  { x: -12, z: 18 }, { x: 12, z: -20 }, { x: -20, z: -18 },
+  { x: 0, z: 38 }, { x: 0, z: -38 }, { x: 38, z: 0 }, { x: -38, z: 0 },
+  { x: 26, z: 26 }, { x: -26, z: -26 }
+];
+const LAMP_POLE_HEIGHT = 4.2;
+const lampPoleGeo = new THREE.CylinderGeometry(0.08, 0.08, 1, 6);
+const lampPoleMat = new THREE.MeshStandardMaterial({ color: 0x1a2530 });
+const lampBulbGeo = new THREE.SphereGeometry(0.28, 10, 8);
+const lampBulbMat = new THREE.MeshStandardMaterial({ color: 0xffdca8, emissive: 0xffbb66, emissiveIntensity: 1.4 });
+for (const p of LAMP_POSITIONS) {
+  const pole = new THREE.Mesh(lampPoleGeo, lampPoleMat);
+  pole.scale.set(1, LAMP_POLE_HEIGHT, 1);
+  pole.position.set(p.x, LAMP_POLE_HEIGHT / 2, p.z);
+  scene.add(pole);
+
+  const bulb = new THREE.Mesh(lampBulbGeo, lampBulbMat);
+  bulb.position.set(p.x, LAMP_POLE_HEIGHT, p.z);
+  scene.add(bulb);
+
+  const light = new THREE.PointLight(0xffbb66, 12, 16, 2);
+  light.position.set(p.x, LAMP_POLE_HEIGHT, p.z);
+  scene.add(light);
 }
 
 // ---------- Collision ----------
@@ -100,8 +128,9 @@ const PLAYER_RADIUS = 0.5;
 
 function collidesAt(x, z) {
   for (const o of OBSTACLES) {
-    const half = o.size / 2 + PLAYER_RADIUS;
-    if (Math.abs(x - o.x) < half && Math.abs(z - o.z) < half) return true;
+    const minDist = o.radius + PLAYER_RADIUS;
+    const dx = x - o.x, dz = z - o.z;
+    if (dx * dx + dz * dz < minDist * minDist) return true;
   }
   const distFromCenter = Math.sqrt(x * x + z * z);
   return distFromCenter > ARENA_RADIUS - 1;
@@ -174,6 +203,65 @@ function buildAvatar(color, role) {
     group.add(spike);
   }
   return group;
+}
+
+// ---------- Orbs (random collectible pickups for runners) ----------
+const ORB_COLLECT_RADIUS = 1.8; // client-side feel; server re-validates with its own (larger) tolerance
+const orbGeo = new THREE.SphereGeometry(0.35, 12, 10);
+const orbMat = new THREE.MeshStandardMaterial({ color: 0x7cf5d8, emissive: 0x2fbfa0, emissiveIntensity: 1.2 });
+let orbs = []; // { x, z, mesh, collected }
+let orbsCollectedCount = 0;
+
+function buildOrbMesh() {
+  const mesh = new THREE.Mesh(orbGeo, orbMat);
+  mesh.position.y = 1.1;
+  return mesh;
+}
+
+function clearOrbs() {
+  for (const o of orbs) scene.remove(o.mesh);
+  orbs = [];
+  orbsCollectedCount = 0;
+}
+
+function spawnOrbsFromServer(list) {
+  clearOrbs();
+  for (const o of list) {
+    const mesh = buildOrbMesh();
+    mesh.position.x = o.x;
+    mesh.position.z = o.z;
+    scene.add(mesh);
+    orbs.push({ x: o.x, z: o.z, mesh, collected: false });
+  }
+}
+
+function markOrbCollected(index, showMessage = true) {
+  const orb = orbs[index];
+  if (!orb || orb.collected) return;
+  orb.collected = true;
+  orb.mesh.visible = false;
+  orbsCollectedCount += 1;
+  if (showMessage) addKillfeed(`✨ Balise collectée (${orbsCollectedCount}/${orbs.length})`);
+}
+
+function updateOrbs(delta) {
+  for (const orb of orbs) {
+    if (!orb.collected) orb.mesh.rotation.y += delta * 2;
+  }
+  if (myRole !== 'runner' || !alive) return;
+  const obj = controls.getObject();
+  orbs.forEach((orb, index) => {
+    if (orb.collected) return;
+    const dx = obj.position.x - orb.x;
+    const dz = obj.position.z - orb.z;
+    if (dx * dx + dz * dz > ORB_COLLECT_RADIUS * ORB_COLLECT_RADIUS) return;
+    if (offlineMode) {
+      markOrbCollected(index);
+    } else {
+      markOrbCollected(index); // optimistic local hide; server broadcast below just confirms
+      socket.emit('collectOrb', index);
+    }
+  });
 }
 
 // ---------- Offline mode (solo, vs bots — for testing changes without a second player) ----------
@@ -302,6 +390,7 @@ function startOfflineMode() {
   clearAllRemotes();
   controls.getObject().rotation.y = 0;
   applyOfflineRole();
+  spawnOrbsFromServer([randomArenaPoint(), randomArenaPoint(), randomArenaPoint()]);
   timerEl.textContent = '∞';
 }
 
@@ -384,6 +473,7 @@ function renderLobbyUI(payload) {
   } else {
     lobbyEl.classList.remove('hidden');
     endScreenEl.classList.add('hidden');
+    clearOrbs();
     if (state === 'countdown') {
       lobbyStatusEl.textContent = `La partie démarre dans ${countdown}s...`;
     } else {
@@ -416,6 +506,16 @@ function addKillfeed(text) {
   setTimeout(() => div.remove(), 5000);
 }
 
+let killBannerTimeout = null;
+function showKillBanner(name) {
+  killBannerTextEl.textContent = `💀 ${name} éliminé`;
+  killBannerEl.classList.remove('hidden', 'kill-anim');
+  void killBannerEl.offsetWidth; // restart the CSS animation even if a kill just played
+  killBannerEl.classList.add('kill-anim');
+  clearTimeout(killBannerTimeout);
+  killBannerTimeout = setTimeout(() => killBannerEl.classList.add('hidden'), 2200);
+}
+
 // ---------- Socket events ----------
 socket.on('connect', () => {
   myId = socket.id;
@@ -444,6 +544,7 @@ socket.on('roundStart', (payload) => {
   roundRemaining = payload.duration;
   endScreenEl.classList.add('hidden');
   clearAllRemotes();
+  spawnOrbsFromServer(payload.orbs || []);
   for (const p of payload.players) knownPlayers.set(p.id, p);
   for (const p of payload.players) {
     if (p.id === myId) {
@@ -480,6 +581,10 @@ socket.on('playerMoved', (p) => {
   addOrUpdateRemote(p);
 });
 
+socket.on('orbCollected', ({ index }) => {
+  markOrbCollected(index);
+});
+
 socket.on('killed', ({ id }) => {
   const known = knownPlayers.get(id);
   if (known) known.alive = false;
@@ -492,6 +597,7 @@ socket.on('killed', ({ id }) => {
   } else {
     addKillfeed(`💀 ${name} a été éliminé`);
   }
+  showKillBanner(name);
 });
 
 socket.on('roundEnd', ({ winner, reason }) => {
@@ -561,6 +667,7 @@ function animate() {
   const delta = Math.min(clock.getDelta(), 0.1);
   updateMovement(delta);
   if (offlineMode) updateOfflineBots(delta);
+  updateOrbs(delta);
   interpolateRemotes(delta);
   renderer.render(scene, camera);
 }

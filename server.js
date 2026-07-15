@@ -14,6 +14,9 @@ const MIN_PLAYERS = 2;
 const COUNTDOWN_SECONDS = 5;
 const ROUND_SECONDS = 150;
 const KILL_RADIUS = 2.2;
+const ARENA_RADIUS = 45; // must match client's ARENA_RADIUS
+const ORB_COUNT = 3;
+const ORB_COLLECT_RADIUS = 2.5;
 
 const COLORS = [0x3fa9f5, 0xf5a93f, 0x7cf53f, 0xf53f9e, 0x3ff5d8, 0xd83ff5, 0xf5f13f, 0xf53f3f];
 
@@ -26,6 +29,7 @@ let countdownRemaining = 0;
 let roundTimer = null;
 let roundRemaining = 0;
 let tickInterval = null;
+let orbs = []; // {x, z, collected} — random pickups runners can go collect during a round
 
 function publicPlayer(p) {
   return { id: p.id, name: p.name, color: p.color, role: p.role, alive: p.alive, x: p.x, y: p.y, z: p.z, ry: p.ry };
@@ -79,9 +83,19 @@ function maybeStartCountdown() {
 
 function spawnPosition(index, total, isHunter) {
   if (isHunter) return { x: 0, y: 1, z: 0, ry: 0 };
-  const radius = 18;
+  const radius = 30;
   const angle = (index / Math.max(1, total)) * Math.PI * 2;
   return { x: Math.cos(angle) * radius, y: 1, z: Math.sin(angle) * radius, ry: angle + Math.PI };
+}
+
+function generateOrbs() {
+  const list = [];
+  for (let i = 0; i < ORB_COUNT; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const r = 6 + Math.random() * (ARENA_RADIUS - 9);
+    list.push({ x: Math.cos(angle) * r, z: Math.sin(angle) * r, collected: false });
+  }
+  return list;
 }
 
 function startRound() {
@@ -106,10 +120,12 @@ function startRound() {
 
   state = 'running';
   roundRemaining = ROUND_SECONDS;
+  orbs = generateOrbs();
 
   io.emit('roundStart', {
     duration: ROUND_SECONDS,
-    players: Array.from(players.values()).map(publicPlayer)
+    players: Array.from(players.values()).map(publicPlayer),
+    orbs: orbs.map((o) => ({ x: o.x, z: o.z }))
   });
 
   tickInterval = setInterval(() => {
@@ -195,6 +211,17 @@ io.on('connection', (socket) => {
       }
     }
     checkHunterWin();
+  });
+
+  socket.on('collectOrb', (index) => {
+    if (state !== 'running') return;
+    if (player.role !== 'runner' || !player.alive) return;
+    if (typeof index !== 'number' || !orbs[index] || orbs[index].collected) return;
+    const dx = player.x - orbs[index].x;
+    const dz = player.z - orbs[index].z;
+    if (Math.sqrt(dx * dx + dz * dz) > ORB_COLLECT_RADIUS) return;
+    orbs[index].collected = true;
+    io.emit('orbCollected', { index, by: player.id });
   });
 
   socket.on('disconnect', () => {
