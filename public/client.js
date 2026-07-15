@@ -137,8 +137,45 @@ function collidesAt(x, z) {
 }
 
 // ---------- Controls ----------
+// PointerLockControls only drives the camera's look direction (yaw+pitch) here.
+// The actual gameplay position is tracked separately in playerPos, and each frame the
+// camera is placed behind/above playerPos along its own look direction (third-person orbit).
 const controls = new PointerLockControls(camera, renderer.domElement);
-scene.add(controls.getObject());
+scene.add(camera);
+controls.minPolarAngle = Math.PI * 0.15;
+controls.maxPolarAngle = Math.PI * 0.85;
+
+const playerPos = new THREE.Vector3(0, 1.6, 0);
+const THIRD_PERSON_DISTANCE = 5.5;
+const THIRD_PERSON_TARGET_HEIGHT = 1.1;
+let myAvatar = null;
+
+const _yawEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+function getYaw() {
+  // Pure yaw independent of pitch: same 'YXZ' order PointerLockControls used to build the quaternion.
+  _yawEuler.setFromQuaternion(camera.quaternion, 'YXZ');
+  return _yawEuler.y;
+}
+
+function updateThirdPersonCamera() {
+  const target = new THREE.Vector3(playerPos.x, playerPos.y - 1.6 + THIRD_PERSON_TARGET_HEIGHT, playerPos.z);
+  const back = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
+  camera.position.copy(target).addScaledVector(back, THIRD_PERSON_DISTANCE);
+  if (camera.position.y < 0.6) camera.position.y = 0.6;
+}
+
+function setMyAvatar(color, role) {
+  if (myAvatar) scene.remove(myAvatar);
+  myAvatar = buildAvatar(color, role);
+  scene.add(myAvatar);
+}
+
+function updateMyAvatar() {
+  if (!myAvatar) return;
+  myAvatar.position.set(playerPos.x, 0, playerPos.z);
+  myAvatar.rotation.y = getYaw();
+  myAvatar.visible = alive;
+}
 
 const keys = { forward: false, back: false, left: false, right: false };
 document.addEventListener('keydown', (e) => {
@@ -205,65 +242,6 @@ function buildAvatar(color, role) {
   return group;
 }
 
-// ---------- Orbs (random collectible pickups for runners) ----------
-const ORB_COLLECT_RADIUS = 1.8; // client-side feel; server re-validates with its own (larger) tolerance
-const orbGeo = new THREE.SphereGeometry(0.35, 12, 10);
-const orbMat = new THREE.MeshStandardMaterial({ color: 0x7cf5d8, emissive: 0x2fbfa0, emissiveIntensity: 1.2 });
-let orbs = []; // { x, z, mesh, collected }
-let orbsCollectedCount = 0;
-
-function buildOrbMesh() {
-  const mesh = new THREE.Mesh(orbGeo, orbMat);
-  mesh.position.y = 1.1;
-  return mesh;
-}
-
-function clearOrbs() {
-  for (const o of orbs) scene.remove(o.mesh);
-  orbs = [];
-  orbsCollectedCount = 0;
-}
-
-function spawnOrbsFromServer(list) {
-  clearOrbs();
-  for (const o of list) {
-    const mesh = buildOrbMesh();
-    mesh.position.x = o.x;
-    mesh.position.z = o.z;
-    scene.add(mesh);
-    orbs.push({ x: o.x, z: o.z, mesh, collected: false });
-  }
-}
-
-function markOrbCollected(index, showMessage = true) {
-  const orb = orbs[index];
-  if (!orb || orb.collected) return;
-  orb.collected = true;
-  orb.mesh.visible = false;
-  orbsCollectedCount += 1;
-  if (showMessage) addKillfeed(`✨ Balise collectée (${orbsCollectedCount}/${orbs.length})`);
-}
-
-function updateOrbs(delta) {
-  for (const orb of orbs) {
-    if (!orb.collected) orb.mesh.rotation.y += delta * 2;
-  }
-  if (myRole !== 'runner' || !alive) return;
-  const obj = controls.getObject();
-  orbs.forEach((orb, index) => {
-    if (orb.collected) return;
-    const dx = obj.position.x - orb.x;
-    const dz = obj.position.z - orb.z;
-    if (dx * dx + dz * dz > ORB_COLLECT_RADIUS * ORB_COLLECT_RADIUS) return;
-    if (offlineMode) {
-      markOrbCollected(index);
-    } else {
-      markOrbCollected(index); // optimistic local hide; server broadcast below just confirms
-      socket.emit('collectOrb', index);
-    }
-  });
-}
-
 // ---------- Offline mode (solo, vs bots — for testing changes without a second player) ----------
 const OFFLINE_RUNNER_BOT_COUNT = 3;
 const BOT_RUNNER_SPEED = MOVE_SPEED * 0.7;
@@ -318,7 +296,6 @@ function moveBotToward(bot, tx, tz, step) {
 }
 
 function updateOfflineBots(delta) {
-  const obj = controls.getObject();
   for (const bot of offlineBots) {
     if (!bot.alive) continue;
     if (bot.role === 'runner') {
@@ -327,8 +304,8 @@ function updateOfflineBots(delta) {
       }
       moveBotToward(bot, bot.wanderTarget.x, bot.wanderTarget.z, BOT_RUNNER_SPEED * delta);
     } else if (alive) {
-      moveBotToward(bot, obj.position.x, obj.position.z, BOT_HUNTER_SPEED * delta);
-      const dist = Math.hypot(obj.position.x - bot.x, obj.position.z - bot.z);
+      moveBotToward(bot, playerPos.x, playerPos.z, BOT_HUNTER_SPEED * delta);
+      const dist = Math.hypot(playerPos.x - bot.x, playerPos.z - bot.z);
       if (dist <= KILL_RADIUS) {
         alive = false;
         controls.unlock();
@@ -340,10 +317,9 @@ function updateOfflineBots(delta) {
 }
 
 function attackOfflineBots() {
-  const obj = controls.getObject();
   for (const bot of offlineBots) {
     if (!bot.alive) continue;
-    const dist = Math.hypot(obj.position.x - bot.x, obj.position.z - bot.z);
+    const dist = Math.hypot(playerPos.x - bot.x, playerPos.z - bot.z);
     if (dist <= KILL_RADIUS) {
       bot.alive = false;
       bot.mesh.visible = false;
@@ -368,7 +344,8 @@ function offlineRoleStatusText() {
 
 function applyOfflineRole() {
   alive = true;
-  controls.getObject().position.set(0, 1.6, 0);
+  playerPos.set(0, 1.6, 0);
+  setMyAvatar(0xffffff, myRole);
   spawnOfflineBots();
   roleEl.textContent = myRole === 'hunter' ? '🔴 [HORS LIGNE] Chasseur (test)' : '🏃 [HORS LIGNE] Runner (test)';
   statusEl.textContent = offlineRoleStatusText();
@@ -388,9 +365,9 @@ function startOfflineMode() {
   endScreenEl.classList.add('hidden');
   offlineControlsEl.classList.remove('hidden');
   clearAllRemotes();
-  controls.getObject().rotation.y = 0;
+  camera.rotation.y = 0;
   applyOfflineRole();
-  spawnOrbsFromServer([randomArenaPoint(), randomArenaPoint(), randomArenaPoint()]);
+  updateThirdPersonCamera();
   timerEl.textContent = '∞';
 }
 
@@ -473,7 +450,6 @@ function renderLobbyUI(payload) {
   } else {
     lobbyEl.classList.remove('hidden');
     endScreenEl.classList.add('hidden');
-    clearOrbs();
     if (state === 'countdown') {
       lobbyStatusEl.textContent = `La partie démarre dans ${countdown}s...`;
     } else {
@@ -544,14 +520,15 @@ socket.on('roundStart', (payload) => {
   roundRemaining = payload.duration;
   endScreenEl.classList.add('hidden');
   clearAllRemotes();
-  spawnOrbsFromServer(payload.orbs || []);
   for (const p of payload.players) knownPlayers.set(p.id, p);
   for (const p of payload.players) {
     if (p.id === myId) {
       myRole = p.role;
       alive = true;
-      controls.getObject().position.set(p.x, 1.6, p.z);
-      controls.getObject().rotation.y = p.ry;
+      playerPos.set(p.x, 1.6, p.z);
+      camera.rotation.y = p.ry;
+      setMyAvatar(p.color, p.role);
+      updateThirdPersonCamera();
       roleEl.textContent = myRole === 'hunter' ? '🔴 Tu es le CHASSEUR' : '🏃 Tu es un RUNNER';
       statusEl.textContent = myRole === 'hunter' ? 'Clique pour attaquer les runners proches' : 'Survis jusqu\'à la fin du chrono !';
     } else {
@@ -579,10 +556,6 @@ socket.on('playerLeft', ({ id }) => {
 socket.on('playerMoved', (p) => {
   if (!knownPlayers.has(p.id)) return;
   addOrUpdateRemote(p);
-});
-
-socket.on('orbCollected', ({ index }) => {
-  markOrbCollected(index);
 });
 
 socket.on('killed', ({ id }) => {
@@ -625,41 +598,35 @@ const _right = new THREE.Vector3();
 const _forward = new THREE.Vector3();
 
 function updateMovement(delta) {
-  if (gameState !== 'running' || !alive || !controls.isLocked) return;
+  if (gameState === 'running' && alive && controls.isLocked) {
+    const speedMultiplier = myRole === 'hunter' ? HUNTER_SPEED_MULTIPLIER : 1.0;
+    const speed = MOVE_SPEED * speedMultiplier * delta;
+    const forwardInput = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0);
+    const rightInput = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
 
-  const speedMultiplier = myRole === 'hunter' ? HUNTER_SPEED_MULTIPLIER : 1.0;
-  const speed = MOVE_SPEED * speedMultiplier * delta;
-  const forwardInput = (keys.forward ? 1 : 0) - (keys.back ? 1 : 0);
-  const rightInput = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+    if (forwardInput !== 0 || rightInput !== 0) {
+      _right.setFromMatrixColumn(camera.matrix, 0);
+      _forward.crossVectors(camera.up, _right);
 
-  const obj = controls.getObject();
+      const dx = (_forward.x * forwardInput + _right.x * rightInput) * speed;
+      const dz = (_forward.z * forwardInput + _right.z * rightInput) * speed;
 
-  if (forwardInput !== 0 || rightInput !== 0) {
-    _right.setFromMatrixColumn(camera.matrix, 0);
-    _forward.crossVectors(camera.up, _right);
+      // Resolve X and Z separately so the player slides along obstacle edges instead of stopping dead.
+      if (!collidesAt(playerPos.x + dx, playerPos.z)) playerPos.x += dx;
+      if (!collidesAt(playerPos.x, playerPos.z + dz)) playerPos.z += dz;
+    }
 
-    const dx = (_forward.x * forwardInput + _right.x * rightInput) * speed;
-    const dz = (_forward.z * forwardInput + _right.z * rightInput) * speed;
-
-    // Resolve X and Z separately so the player slides along obstacle edges instead of stopping dead.
-    if (!collidesAt(obj.position.x + dx, obj.position.z)) obj.position.x += dx;
-    if (!collidesAt(obj.position.x, obj.position.z + dz)) obj.position.z += dz;
+    if (!offlineMode) {
+      const now = performance.now();
+      if (now - lastSent > NETWORK_RATE_MS) {
+        lastSent = now;
+        socket.emit('move', { x: playerPos.x, y: playerPos.y, z: playerPos.z, ry: getYaw() });
+      }
+    }
   }
 
-  obj.position.y = 1.6;
-
-  if (offlineMode) return;
-
-  const now = performance.now();
-  if (now - lastSent > NETWORK_RATE_MS) {
-    lastSent = now;
-    socket.emit('move', {
-      x: obj.position.x,
-      y: obj.position.y,
-      z: obj.position.z,
-      ry: obj.rotation.y
-    });
-  }
+  updateMyAvatar();
+  updateThirdPersonCamera();
 }
 
 function animate() {
@@ -667,7 +634,6 @@ function animate() {
   const delta = Math.min(clock.getDelta(), 0.1);
   updateMovement(delta);
   if (offlineMode) updateOfflineBots(delta);
-  updateOrbs(delta);
   interpolateRemotes(delta);
   renderer.render(scene, camera);
 }
