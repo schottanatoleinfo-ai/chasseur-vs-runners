@@ -278,8 +278,7 @@ function offlineRoleStatusText() {
   return `${base} — Clique sur l'écran pour activer les contrôles.`;
 }
 
-function toggleOfflineRole() {
-  myRole = myRole === 'hunter' ? 'runner' : 'hunter';
+function applyOfflineRole() {
   alive = true;
   controls.getObject().position.set(0, 1.6, 0);
   spawnOfflineBots();
@@ -287,21 +286,22 @@ function toggleOfflineRole() {
   statusEl.textContent = offlineRoleStatusText();
 }
 
+function toggleOfflineRole() {
+  myRole = myRole === 'hunter' ? 'runner' : 'hunter';
+  applyOfflineRole();
+}
+
 function startOfflineMode() {
   offlineMode = true;
   socket.disconnect();
-  myRole = 'hunter';
-  alive = true;
+  myRole = Math.random() < 0.5 ? 'hunter' : 'runner';
   gameState = 'running';
   lobbyEl.classList.add('hidden');
   endScreenEl.classList.add('hidden');
   offlineControlsEl.classList.remove('hidden');
   clearAllRemotes();
-  controls.getObject().position.set(0, 1.6, 0);
   controls.getObject().rotation.y = 0;
-  spawnOfflineBots();
-  roleEl.textContent = '🔴 [HORS LIGNE] Chasseur (test)';
-  statusEl.textContent = offlineRoleStatusText();
+  applyOfflineRole();
   timerEl.textContent = '∞';
 }
 
