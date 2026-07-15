@@ -234,6 +234,7 @@ function renderLobbyUI(payload) {
     lobbyEl.classList.add('hidden');
   } else {
     lobbyEl.classList.remove('hidden');
+    endScreenEl.classList.add('hidden');
     if (state === 'countdown') {
       lobbyStatusEl.textContent = `La partie démarre dans ${countdown}s...`;
     } else {
